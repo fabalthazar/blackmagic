@@ -22,10 +22,10 @@
  * the device, providing the XML memory map and Flash memory programming.
  *
  * References:
- * RM0454 - Rev 5
+ * RM0454 - Rev 5 (Value line)
  *   Reference manual - STM32G0x0 advanced ARM(R)-based 32-bit MCUs
  *                      (STM32G030/STM32G050/STM32G070/STM32G0B0)
- * RM0444 - Rev 5
+ * RM0444 - Rev 5 (Access line)
  *   Reference manual - STM32G0x1 advanced ARM(R)-based 32-bit MCUs
  *                      (STM32G031/STM32G041/STM32G051/STM32G061/
  *                       STM32G071/STM32G081/STM32G0B1/STM32G0C1)
@@ -48,8 +48,13 @@
 //#define FLASH_BANK_SIZE_256kB 0x40000
 
 #define FLASH_BASE 0x40022000
+#define FLASH_KEYR (FLASH_BASE + 0x008)
+#define FLASH_KEYR_KEY1 0x45670123
+#define FLASH_KEYR_KEY2 0xCDEF89AB
 #define FLASH_CR (FLASH_BASE + 0x014)
 #define FLASH_CR_LOCK (1U << 31U)
+#define FLASH_CR_OBL_LAUNCH (1U << 27U)
+#define FLASH_CR_OPTSTRT (1U << 17U)
 #define FLASH_CR_STRT (1U << 16U)
 #define FLASH_CR_MER2 (1U << 15U)
 #define FLASH_CR_MER1 (1U << 2U)
@@ -57,10 +62,6 @@
 #define FLASH_CR_PNB_SHIFT 3U
 #define FLASH_CR_PER (1U << 1U)
 #define FLASH_CR_PG (1U << 0U)
-
-#define FLASH_KEYR (FLASH_BASE + 0x008)
-#define FLASH_KEYR_KEY1 0x45670123
-#define FLASH_KEYR_KEY2 0xCDEF89AB
 
 #define FLASH_SR (FLASH_BASE + 0x010)
 #define FLASH_SR_CFGBSY (1U << 18U)
@@ -84,8 +85,24 @@
                              FLASH_SR_PROGERR | FLASH_SR_OPERR)
 #define FLASH_SR_BSY_MASK (FLASH_SR_BSY2 | FLASH_SR_BSY1)
 
+#define FLASH_OPTKEYR (FLASH_BASE + 0x00C)
+#define FLASH_OPTKEYR_KEY1 0x08192A3B
+#define FLASH_OPTKEYR_KEY2 0x4C5D6E7F
 #define FLASH_OPTR (FLASH_BASE + 0x020)
 #define FLASH_OPTR_DUAL_BANK (1U << 21U)
+#define FLASH_PCROP1ASR (FLASH_BASE + 0x024)
+#define FLASH_PCROP1AER (FLASH_BASE + 0x028)
+#define FLASH_WRP1AR (FLASH_BASE + 0x02C)
+#define FLASH_WRP1BR (FLASH_BASE + 0x030)
+#define FLASH_PCROP1BSR (FLASH_BASE + 0x034)
+#define FLASH_PCROP1BER (FLASH_BASE + 0x038)
+#define FLASH_PCROP2ASR (FLASH_BASE + 0x044)
+#define FLASH_PCROP2AER (FLASH_BASE + 0x048)
+#define FLASH_WRP2AR (FLASH_BASE + 0x04C)
+#define FLASH_WRP2BR (FLASH_BASE + 0x050)
+#define FLASH_PCROP2BSR (FLASH_BASE + 0x054)
+#define FLASH_PCROP2BER (FLASH_BASE + 0x058)
+#define FLASH_SECR (FLASH_BASE + 0x080)
 
 /* RAM */
 #define RAM_START 0x20000000
@@ -120,8 +137,8 @@ static int stm32g0_flash_erase(struct target_flash *f,
                                target_addr addr, size_t len);
 static int stm32g0_flash_write(struct target_flash *f,
                                target_addr dest, const void *src, size_t len);
-static void stm32g0_flash_unlock(target *t);
-static void stm32g0_flash_lock(target *t);
+//static void stm32g0_flash_unlock(target *t);
+//static void stm32g0_flash_lock(target *t);
 //static bool stm32g0_is_dual_bank_splitted(target *t)
 //{
 	//return ((target_mem_read32(t, FLASH_OPTR) & FLASH_OPTR_DUAL_BANK) > 0U);
@@ -458,16 +475,162 @@ static bool stm32g0_cmd_erase_bank2(target *t, int argc, const char **argv)
 	return stm32g0_cmd_erase(t, FLASH_CR_MER2);
 }
 
+static void stm32g0_flash_option_unlock(target *t)
+{
+	target_mem_write32(t, FLASH_OPTKEYR, FLASH_OPTKEYR_KEY1);
+	target_mem_write32(t, FLASH_OPTKEYR, FLASH_OPTKEYR_KEY2);
+}
+
+enum option_bytes_registers {
+	OPTR = 0,
+	PCROP1ASR,
+	PCROP1AER,
+	WRP1AR,
+	WRP1BR,
+	PCROP1BSR,
+	PCROP1BER,
+	PCROP2ASR,
+	PCROP2AER,
+	WRP2AR,
+	WRP2BR,
+	PCROP2BSR,
+	PCROP2BER,
+	SECR,
+
+	NB_OPT
+};
+struct option_bytes_s {
+	uint32_t addr;
+	uint32_t val;
+};
+
+/*
+ * G0x1: OPTR = FFFFFEAA
+ * 1111 1111 1111 1111 1111 1110 1010 1010
+ * G0x0: OPTR = DFFFE1AA
+ * 1101 1111 1111 1111 1110 0001 1010 1010
+ *   *IRHEN               * ****BOREN
+ *                        BORF_LEV = 11 (2.8 V) / 00 (2.0 V)
+ *                        BORR_LEV = 11 (2.9 V) / 00 (2.1 V)
+ * IRH and BOR are reserved on G0x0, it is safe to apply G0x1 options.
+ * The same for PCROP and SECR.
+ */
+
+static const struct option_bytes_s options_def[NB_OPT] = {
+	[OPTR]      = {FLASH_OPTR,      0xFFFFFEAA}, // DFFFE1AA in G0x0
+	[PCROP1ASR] = {FLASH_PCROP1ASR, 0xFFFFFFFF},
+	[PCROP1AER] = {FLASH_PCROP1AER, 0x00000000},
+	[WRP1AR]    = {FLASH_WRP1AR,    0x000000FF},
+	[WRP1BR]    = {FLASH_WRP1BR,    0x000000FF},
+	[PCROP1BSR] = {FLASH_PCROP1BSR, 0xFFFFFFFF},
+	[PCROP1BER] = {FLASH_PCROP1BER, 0x00000000},
+	[PCROP2ASR] = {FLASH_PCROP2ASR, 0xFFFFFFFF},
+	[PCROP2AER] = {FLASH_PCROP2AER, 0x00000000},
+	[WRP2AR]    = {FLASH_WRP2AR,    0x000000FF},
+	[WRP2BR]    = {FLASH_WRP2BR,    0x000000FF},
+	[PCROP2BSR] = {FLASH_PCROP2BSR, 0xFFFFFFFF},
+	[PCROP2BER] = {FLASH_PCROP2BER, 0x00000000},
+	[SECR]      = {FLASH_SECR,      0x00000000}
+};
+
+static bool stm32g0_option_write(target *t, const uint32_t *options_tab)
+{
+	bool ret = true;
+
+	stm32g0_flash_unlock(t);
+	stm32g0_flash_option_unlock(t);
+
+	/* Wait for Flash not busy */
+	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY_MASK) {
+		if (target_check_error(t))
+			goto exit_error;
+	}
+
+	for (uint8_t i = 0U; i < NB_OPT; i++)
+		target_mem_write32(t, options_def[i].addr, options_tab[i]);
+
+	target_mem_write32(t, FLASH_CR, FLASH_CR_OPTSTRT);
+	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY_MASK) {
+		if (target_check_error(t))
+			goto exit_error;
+	}
+
+	/* Option bytes loading generates a system reset */
+	target_mem_write32(t, FLASH_CR, FLASH_CR_OBL_LAUNCH);
+
+	goto exit_cleanup;
+
+exit_error:
+	ret = false;
+exit_cleanup:
+	stm32g0_flash_lock(t); // Also locks option bytes
+	return ret;
+}
+
+//#define OPTION_USAGE_BASE "usage: monitor option"
 /*
  * Option bytes programming
  *
  */
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 {
-	(void)t;
-	(void)argc;
-	(void)argv;
-	return false; // TODO
+	bool ret = true;
+	uint8_t i = 0U;
+	uint32_t addr = 0U;
+	uint32_t val = 0U;
+	uint32_t options_req[NB_OPT] = {0U};
+
+	// TODO keep current registers?
+
+	if ((argc == 2) && !strcmp(argv[1], "erase")) {
+		for (i = 0U; i < NB_OPT; i++)
+			options_req[i] = options_def[i].val;
+		stm32g0_option_write(t, options_req);
+	} else if ((argc > 2) && !strcmp(argv[1], "write")) {
+		// TODO
+		//~ int i;
+		//~ for (i = 2; i < argc; i++)
+			//~ values[i - 2] = strtoul(argv[i], NULL, 0);
+		//~ for (i = i - 2; i < len; i++) {
+			//~ uint32_t addr = FPEC_BASE + i2offset[i];
+			//~ values[i] = target_mem_read32(t, addr);
+		//~ }
+		//~ if ((values[0] & 0xff) == 0xCC) {
+			//~ values[0]++;
+			//~ tc_printf(t, "Changing Level 2 request to Level 1!");
+		//~ }
+		//~ res = stm32l4_option_write(t, values, len, i2offset);
+	} else if (argc == 3) {
+		addr = strtoul(argv[1], NULL, 0);
+		val = strtoul(argv[2], NULL, 0);
+		for (i = 0U; i < NB_OPT; i++) {
+			if (addr == options_def[i].addr)
+				options_req[i] = val;
+			else
+				options_req[i] = options_def[i].val;
+		}
+		if (!stm32g0_option_write(t, options_req))
+			goto exit_error;
+	} else {
+		tc_printf(t, "usage: monitor option erase\n");
+		tc_printf(t, "usage: monitor option <addr> <value>\n");
+		tc_printf(t, "usage: monitor option write <%u values> ...\n",
+		          NB_OPT);
+	}
+
+	for (i = 0U; i < NB_OPT; i++) {
+		val = target_mem_read32(t, options_def[i].addr);
+		tc_printf(t, "0x%08X: 0x%08X\n", options_def[i].addr, val);
+	}
+
+	goto exit_cleanup;
+
+exit_error:
+	tc_printf(t, "Writing options failed!\n");
+	ret = false;
+exit_cleanup:
+	stm32g0_flash_lock(t); // Also locks option bytes
+	return ret;
 }
 
 static bool stm32g0_cmd_otp(target *t, int argc, const char **argv)
