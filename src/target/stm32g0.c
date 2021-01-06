@@ -139,7 +139,7 @@ const struct command_s stm32g0_cmd_list[] = {
 	{"erase_bank1", (cmd_handler)stm32g0_cmd_erase_bank1, "Erase entire bank1 flash memory"},
 	{"erase_bank2", (cmd_handler)stm32g0_cmd_erase_bank2, "Erase entire bank2 flash memory"},
 	{"option", (cmd_handler)stm32g0_cmd_option, "Manipulate option bytes"},
-	{"otp", (cmd_handler)stm32g0_cmd_otp, "Write the OTP flash memory"},
+	{"otp", (cmd_handler)stm32g0_cmd_otp, "Write the OTP area (irreversible)"},
 	{NULL, NULL, NULL}
 };
 
@@ -251,7 +251,7 @@ static bool stm32g0_attach(target *t)
 }
 
 /*
- * Reset the target debug specific registers and detach the debug core.
+ * Reset the target-specific debug registers and detach the debug core.
  */
 static void stm32g0_detach(target *t)
 {
@@ -350,7 +350,6 @@ static int stm32g0_flash_erase(struct target_flash *f,
 
 exit_error:
 	ret = -1;
-
 exit_cleanup:
 	target_mem_write32(t, FLASH_SR, (uint32_t)FLASH_SR_EOP); // Clear EOP
 	stm32g0_flash_lock(t);
@@ -394,7 +393,6 @@ static int stm32g0_flash_write(struct target_flash *f,
 
 exit_error:
 	ret = -1;
-
 exit_cleanup:
 	target_mem_write32(t, FLASH_SR, (uint32_t)FLASH_SR_EOP); // Clear EOP
 	/* Clear PG: half-word access not to clear unwanted bits */
@@ -407,31 +405,63 @@ exit_cleanup:
  * Custom commands
  * TODO option bytes read/write
  * TODO PCROP_RDP + WRP
- * TODO mass erase
  * TODO write OTP area. This can be done by standard programming in a usual
  * flash region without prior erasing.
  */
+static bool stm32g0_cmd_erase(target *t, uint32_t action_mer)
+{
+	bool ret = true;
+
+	stm32g0_flash_unlock(t);
+
+	target_mem_write32(t, FLASH_CR, action_mer);
+	target_mem_write32(t, FLASH_CR, action_mer | FLASH_CR_STRT);
+
+	/* Read FLASH_SR to poll for BSY bits */
+	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY_MASK) {
+		if (target_check_error(t))
+			goto exit_error;
+	}
+
+	/* Check for error */
+	uint16_t flash_sr = target_mem_read32(t, FLASH_SR);
+	if (flash_sr & FLASH_SR_ERROR_MASK)
+		goto exit_error;
+
+	goto exit_cleanup;
+
+exit_error:
+	ret = false;
+exit_cleanup:
+	stm32g0_flash_lock(t);
+	return ret;
+}
+
 static bool stm32g0_cmd_erase_mass(target *t, int argc, const char **argv)
 {
-	(void)t;
 	(void)argc;
 	(void)argv;
-	return false; // TODO
+	return stm32g0_cmd_erase(t, FLASH_CR_MER1 | FLASH_CR_MER2);
 }
+
 static bool stm32g0_cmd_erase_bank1(target *t, int argc, const char **argv)
 {
-	(void)t;
 	(void)argc;
 	(void)argv;
-	return false; // TODO
+	return stm32g0_cmd_erase(t, FLASH_CR_MER1);
 }
+
 static bool stm32g0_cmd_erase_bank2(target *t, int argc, const char **argv)
 {
-	(void)t;
 	(void)argc;
 	(void)argv;
-	return false; // TODO
+	return stm32g0_cmd_erase(t, FLASH_CR_MER2);
 }
+
+/*
+ * Option bytes programming
+ *
+ */
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 {
 	(void)t;
@@ -439,6 +469,7 @@ static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 	(void)argv;
 	return false; // TODO
 }
+
 static bool stm32g0_cmd_otp(target *t, int argc, const char **argv)
 {
 	(void)t;
