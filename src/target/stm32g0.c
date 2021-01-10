@@ -111,6 +111,11 @@
 #define RAM_SIZE_G07_8 (36U * 1024U) // 36 kB
 #define RAM_SIZE_G0B_C (144U * 1024U) // 144 kB
 
+/* RCC */
+#define RCC_BASE 0x40021000
+#define RCC_APBENR1 (RCC_BASE + 0x3C)
+#define RCC_APBENR1_DBGEN (1U << 27U)
+
 /* DBG */
 #define DBG_BASE 0x40015800
 #define DBG_IDCODE (DBG_BASE + 0x00)
@@ -119,6 +124,11 @@
 #define DBG_CR (DBG_BASE + 0x04)
 #define DBG_CR_DBG_STANDBY (1U << 2U)
 #define DBG_CR_DBG_STOP (1U << 1U)
+#define DBG_APB_FZ1 (DBG_BASE + 0x08)
+#define DBG_APB_FZ2 (DBG_BASE + 0x0C)
+// TODO delete:
+#define DBG_APB_FZ1_DBG_IWDG_STOP (1U << 12U)
+#define DBG_APB_FZ1_DBG_WWDG_STOP (1U << 11U)
 
 /* TODO dev ids */
 enum STM32G0_DEV_ID {
@@ -132,7 +142,8 @@ enum STM32G0_DEV_ID {
 static char driver_name[DRIVER_NAME_LENGTH];
 
 static bool stm32g0_attach(target *t);
-static void stm32g0_detach(target *t);
+//static void stm32g0_detach(target *t);
+//~ static void stm32g0_extended_reset(target *t);
 static int stm32g0_flash_erase(struct target_flash *f,
                                target_addr addr, size_t len);
 static int stm32g0_flash_write(struct target_flash *f,
@@ -150,13 +161,16 @@ static bool stm32g0_cmd_erase_bank1(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_erase_bank2(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_otp(target *t, int argc, const char **argv);
+static bool stm32g0_cmd_dbg(target *t, int argc, const char **argv);
 
+// TODO commands availability depending on chips
 const struct command_s stm32g0_cmd_list[] = {
 	{"erase_mass", (cmd_handler)stm32g0_cmd_erase_mass, "Erase entire flash memory"},
 	{"erase_bank1", (cmd_handler)stm32g0_cmd_erase_bank1, "Erase entire bank1 flash memory"},
 	{"erase_bank2", (cmd_handler)stm32g0_cmd_erase_bank2, "Erase entire bank2 flash memory"},
 	{"option", (cmd_handler)stm32g0_cmd_option, "Manipulate option bytes"},
-	{"otp", (cmd_handler)stm32g0_cmd_otp, "Write the OTP area (irreversible)"},
+	{"otp", (cmd_handler)stm32g0_cmd_otp, "Write the OTP area (irreversible)"}, // TODO
+	{"dbg", (cmd_handler)stm32g0_cmd_dbg, "Write DBG registers"},
 	{NULL, NULL, NULL}
 };
 
@@ -187,36 +201,44 @@ bool stm32g0_probe(target *t)
 {
 	driver_name[0] = '\0';
 	strcat(driver_name, "STM32G0");
+	// TODO cleanup
 	//uint16_t dev_id = (uint16_t)(target_mem_read32(t, DBG_IDCODE) & DBG_DEV_ID_MASK);
 	//switch (dev_id) {
 	switch (t->idcode) {
 	case STM32G03_4:
 		/* SRAM 8 kB, Flash up to 64 kB */
 		strcat(driver_name, "3/4");
-		goto exit_match;
+		break;
 	case STM32G05_6:
 		/* SRAM 18 kB, Flash up to 64 kB */
 		strcat(driver_name, "5/6");
-		goto exit_match;
+		break;
 	case STM32G07_8:
 		/* SRAM 36 kB, Flash up to 128 kB */
 		strcat(driver_name, "7/8");
-		goto exit_match;
+		break;
 	case STM32G0B_C:
 		/* SRAM 144 kB, Flash up to 512 kB */
-		strcat(driver_name, "B/C");
-		goto exit_match;
+		strcat(driver_name, "B/C"); // TODO test this device
+		break;
 	default:
-		goto exit_fail;
+		return false;
 	}
 
-exit_match:
 	t->driver = driver_name;
 	t->attach = stm32g0_attach;
-	t->detach = stm32g0_detach;
+	//t->detach = stm32g0_detach;
+	target_add_commands(t, stm32g0_cmd_list, driver_name);
 	return true;
-exit_fail:
-	return false;
+}
+
+static void stm32g0_dbg_clock_enable(target *t)
+{
+	uint32_t rcc_apbenr1 = target_mem_read32(t, RCC_APBENR1);
+	if ((rcc_apbenr1 & RCC_APBENR1_DBGEN) == 0U) {
+		rcc_apbenr1 |= RCC_APBENR1_DBGEN;
+		target_mem_write32(t, RCC_APBENR1, rcc_apbenr1);
+	}
 }
 
 /*
@@ -224,17 +246,20 @@ exit_fail:
  * keeps the FCLK and HCLK clocks running in Standby and Stop modes while
  * debugging.
  * Populates the memory map and add custom commands.
+ * TODO explain connected_under_reset
  */
 static bool stm32g0_attach(target *t)
 {
 	uint32_t ram_size = 0U;
+	bool connected_under_reset = platform_srst_get_val();
 
 	if (!cortexm_attach(t))
 		return false;
 
-	uint32_t dbg_cr = target_mem_read32(t, DBG_CR);
-	dbg_cr |= (uint32_t)(DBG_CR_DBG_STANDBY | DBG_CR_DBG_STOP);
-	target_mem_write32(t, DBG_CR, dbg_cr);
+	/* Debug in low power mode will be effective on the next reset */
+	stm32g0_dbg_clock_enable(t);
+	target_mem_write32(t, DBG_CR, (uint32_t)(DBG_CR_DBG_STANDBY |
+	                                         DBG_CR_DBG_STOP));
 
 	target_mem_map_free(t);
 
@@ -262,14 +287,18 @@ static bool stm32g0_attach(target *t)
 	/* Dual banks: contiguous in memory */
 	stm32g0_add_flash(t, FLASH_START, flash_size, FLASH_PAGE_SIZE);
 
-	target_add_commands(t, stm32g0_cmd_list, t->driver);
+	// TODO review
+	if (connected_under_reset)
+		target_reset(t); // Applies debug in low power mode
 
 	return true;
 }
 
 /*
  * Reset the target-specific debug registers and detach the debug core.
+ * TODO this may be useless as DBG_CR has effect if debugger attached only.
  */
+ #if 0
 static void stm32g0_detach(target *t)
 {
 	uint32_t dbg_cr = target_mem_read32(t, DBG_CR);
@@ -278,6 +307,7 @@ static void stm32g0_detach(target *t)
 
 	cortexm_detach(t);
 }
+#endif
 
 static void stm32g0_flash_unlock(target *t)
 {
@@ -302,7 +332,6 @@ static int stm32g0_flash_erase(struct target_flash *f,
 {
 	target *t = f->t;
 	target_addr end = addr + len - 1U;
-	//target_addr start = addr;
 	uint16_t bank1_end_page_nb = FLASH_BANK2_START_PAGE_NB - 1U; // Max
 	target_addr bank2_start_addr = 0U;
 	int ret = 0;
@@ -362,7 +391,6 @@ static int stm32g0_flash_erase(struct target_flash *f,
 		DEBUG_WARN("stm32g0 flash erase: sr error: 0x%" PRIu32 "\n", flash_sr);
 		goto exit_error;
 	}
-
 	goto exit_cleanup;
 
 exit_error:
@@ -405,7 +433,6 @@ static int stm32g0_flash_write(struct target_flash *f,
 		DEBUG_WARN("stm32g0 flash write error: sr 0x%" PRIu32 "\n", flash_sr);
 		goto exit_error;
 	}
-
 	goto exit_cleanup;
 
 exit_error:
@@ -419,9 +446,8 @@ exit_cleanup:
 }
 
 /*
- * Custom commands
- * TODO option bytes read/write
- * TODO PCROP_RDP + WRP
+ * Custom commands.
+ * TODO PCROP_RDP + WRP.
  * TODO write OTP area. This can be done by standard programming in a usual
  * flash region without prior erasing.
  */
@@ -444,7 +470,6 @@ static bool stm32g0_cmd_erase(target *t, uint32_t action_mer)
 	uint16_t flash_sr = target_mem_read32(t, FLASH_SR);
 	if (flash_sr & FLASH_SR_ERROR_MASK)
 		goto exit_error;
-
 	goto exit_cleanup;
 
 exit_error:
@@ -482,24 +507,25 @@ static void stm32g0_flash_option_unlock(target *t)
 }
 
 enum option_bytes_registers {
-	OPTR = 0,
-	PCROP1ASR,
-	PCROP1AER,
-	WRP1AR,
-	WRP1BR,
-	PCROP1BSR,
-	PCROP1BER,
-	PCROP2ASR,
-	PCROP2AER,
-	WRP2AR,
-	WRP2BR,
-	PCROP2BSR,
-	PCROP2BER,
-	SECR,
+	OPTR_ENUM = 0,
+	PCROP1ASR_ENUM,
+	PCROP1AER_ENUM,
+	WRP1AR_ENUM,
+	WRP1BR_ENUM,
+	PCROP1BSR_ENUM,
+	PCROP1BER_ENUM,
+	PCROP2ASR_ENUM,
+	PCROP2AER_ENUM,
+	WRP2AR_ENUM,
+	WRP2BR_ENUM,
+	PCROP2BSR_ENUM,
+	PCROP2BER_ENUM,
+	SECR_ENUM,
 
-	NB_OPT
+	NB_REG_OPT
 };
-struct option_bytes_s {
+
+struct registers_s {
 	uint32_t addr;
 	uint32_t val;
 };
@@ -516,24 +542,39 @@ struct option_bytes_s {
  * The same for PCROP and SECR.
  */
 
-static const struct option_bytes_s options_def[NB_OPT] = {
-	[OPTR]      = {FLASH_OPTR,      0xFFFFFEAA}, // DFFFE1AA in G0x0
-	[PCROP1ASR] = {FLASH_PCROP1ASR, 0xFFFFFFFF},
-	[PCROP1AER] = {FLASH_PCROP1AER, 0x00000000},
-	[WRP1AR]    = {FLASH_WRP1AR,    0x000000FF},
-	[WRP1BR]    = {FLASH_WRP1BR,    0x000000FF},
-	[PCROP1BSR] = {FLASH_PCROP1BSR, 0xFFFFFFFF},
-	[PCROP1BER] = {FLASH_PCROP1BER, 0x00000000},
-	[PCROP2ASR] = {FLASH_PCROP2ASR, 0xFFFFFFFF},
-	[PCROP2AER] = {FLASH_PCROP2AER, 0x00000000},
-	[WRP2AR]    = {FLASH_WRP2AR,    0x000000FF},
-	[WRP2BR]    = {FLASH_WRP2BR,    0x000000FF},
-	[PCROP2BSR] = {FLASH_PCROP2BSR, 0xFFFFFFFF},
-	[PCROP2BER] = {FLASH_PCROP2BER, 0x00000000},
-	[SECR]      = {FLASH_SECR,      0x00000000}
+// TODO add an empty row instead of having a NB_ enum
+static const struct registers_s options_def[NB_REG_OPT] = {
+	[OPTR_ENUM]      = {FLASH_OPTR,      0xFFFFFEAA}, // DFFFE1AA in G0x0
+	[PCROP1ASR_ENUM] = {FLASH_PCROP1ASR, 0xFFFFFFFF},
+	[PCROP1AER_ENUM] = {FLASH_PCROP1AER, 0x00000000},
+	[WRP1AR_ENUM]    = {FLASH_WRP1AR,    0x000000FF},
+	[WRP1BR_ENUM]    = {FLASH_WRP1BR,    0x000000FF},
+	[PCROP1BSR_ENUM] = {FLASH_PCROP1BSR, 0xFFFFFFFF},
+	[PCROP1BER_ENUM] = {FLASH_PCROP1BER, 0x00000000},
+	[PCROP2ASR_ENUM] = {FLASH_PCROP2ASR, 0xFFFFFFFF},
+	[PCROP2AER_ENUM] = {FLASH_PCROP2AER, 0x00000000},
+	[WRP2AR_ENUM]    = {FLASH_WRP2AR,    0x000000FF},
+	[WRP2BR_ENUM]    = {FLASH_WRP2BR,    0x000000FF},
+	[PCROP2BSR_ENUM] = {FLASH_PCROP2BSR, 0xFFFFFFFF},
+	[PCROP2BER_ENUM] = {FLASH_PCROP2BER, 0x00000000},
+	[SECR_ENUM]      = {FLASH_SECR,      0x00000000}
 };
 
-static bool stm32g0_option_write(target *t, const uint32_t *options_tab)
+static void stm32g0_registers_write(target *t, const struct registers_s *regs,
+                                    uint8_t nb_regs)
+{
+	for (uint8_t i = 0U; i < nb_regs; i++) {
+		if (regs[i].addr > 0U)
+			target_mem_write32(t, regs[i].addr, regs[i].val);
+	}
+}
+
+/*
+ * Option bytes programming
+ * TODO reconnect after options launch.
+ */
+static bool stm32g0_option_write(target *t,
+                                 const struct registers_s *options_req)
 {
 	bool ret = true;
 
@@ -546,8 +587,7 @@ static bool stm32g0_option_write(target *t, const uint32_t *options_tab)
 			goto exit_error;
 	}
 
-	for (uint8_t i = 0U; i < NB_OPT; i++)
-		target_mem_write32(t, options_def[i].addr, options_tab[i]);
+	stm32g0_registers_write(t, options_req, NB_REG_OPT);
 
 	target_mem_write32(t, FLASH_CR, FLASH_CR_OPTSTRT);
 	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY_MASK) {
@@ -557,79 +597,107 @@ static bool stm32g0_option_write(target *t, const uint32_t *options_tab)
 
 	/* Option bytes loading generates a system reset */
 	target_mem_write32(t, FLASH_CR, FLASH_CR_OBL_LAUNCH);
-
+	tc_printf(t, "Scan and attach again\n");
 	goto exit_cleanup;
 
 exit_error:
-	ret = false;
-exit_cleanup:
 	stm32g0_flash_lock(t); // Also locks option bytes
+	ret = false;
+exit_cleanup: // TODO
 	return ret;
 }
 
-//#define OPTION_USAGE_BASE "usage: monitor option"
+
 /*
- * Option bytes programming
- *
+ * Adds a valid register to the required table (registers to be applied).
+ */
+static bool add_reg_value(struct registers_s *reg_req,
+                          const struct registers_s *reg_def,
+                          uint8_t reg_def_len,
+                          uint32_t addr,
+                          uint32_t val)
+{
+	bool ret = false;
+
+	for (uint8_t j = 0U; j < reg_def_len; j++) {
+		if (addr == reg_def[j].addr) {
+			reg_req[j].addr = addr;
+			reg_req[j].val = val;
+			ret = true;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+/*
+ * Parse (address, value) register pairs given on the command line.
+ */
+static bool parse_cmdline_registers(int args_nb, const char **reg_str,
+                                    struct registers_s *reg_req,
+                                    const struct registers_s *reg_def,
+                                    uint8_t reg_def_len)
+{
+	uint32_t addr = 0U;
+	uint32_t val = 0U;
+	uint8_t valid_regs_nb = 0U;
+
+	for (uint8_t i = 0U; i < args_nb; i += 2U) {
+		addr = strtoul(reg_str[i], NULL, 0);
+		val = strtoul(reg_str[i+1], NULL, 0);
+		if (add_reg_value(reg_req, reg_def, reg_def_len, addr, val))
+			valid_regs_nb++;
+	}
+
+	if (valid_regs_nb > 0U)
+		return true;
+	else
+		return false;
+}
+
+static void display_registers(target *t, const struct registers_s *reg_def,
+                              uint8_t len)
+{
+	uint32_t val = 0U;
+
+	for (uint8_t i = 0U; i < len; i++) {
+		val = target_mem_read32(t, reg_def[i].addr);
+		tc_printf(t, "0x%08X: 0x%08X\n", reg_def[i].addr, val);
+	}
+}
+
+/*
+ * Option bytes manipulating.
+ * TODO check PCROP_RDP deselect if not RDP Level 1?
  */
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 {
 	bool ret = true;
-	uint8_t i = 0U;
-	uint32_t addr = 0U;
-	uint32_t val = 0U;
-	uint32_t options_req[NB_OPT] = {0U};
-
-	// TODO keep current registers?
+	struct registers_s options_req[NB_REG_OPT] = {{0U, 0U}};
 
 	if ((argc == 2) && !strcmp(argv[1], "erase")) {
-		for (i = 0U; i < NB_OPT; i++)
-			options_req[i] = options_def[i].val;
-		stm32g0_option_write(t, options_req);
-	} else if ((argc > 2) && !strcmp(argv[1], "write")) {
-		// TODO
-		//~ int i;
-		//~ for (i = 2; i < argc; i++)
-			//~ values[i - 2] = strtoul(argv[i], NULL, 0);
-		//~ for (i = i - 2; i < len; i++) {
-			//~ uint32_t addr = FPEC_BASE + i2offset[i];
-			//~ values[i] = target_mem_read32(t, addr);
-		//~ }
-		//~ if ((values[0] & 0xff) == 0xCC) {
-			//~ values[0]++;
-			//~ tc_printf(t, "Changing Level 2 request to Level 1!");
-		//~ }
-		//~ res = stm32l4_option_write(t, values, len, i2offset);
-	} else if (argc == 3) {
-		addr = strtoul(argv[1], NULL, 0);
-		val = strtoul(argv[2], NULL, 0);
-		for (i = 0U; i < NB_OPT; i++) {
-			if (addr == options_def[i].addr)
-				options_req[i] = val;
-			else
-				options_req[i] = options_def[i].val;
-		}
+		if (!stm32g0_option_write(t, options_def))
+			goto exit_error;
+	} else if ((argc > 2) && (argc % 2U == 0U) &&
+	           !strcmp(argv[1], "write")) {
+		if (!parse_cmdline_registers(argc - 2, argv + 2, options_req,
+		                                                 options_def,
+		                                                 NB_REG_OPT))
+			goto exit_cleanup;
 		if (!stm32g0_option_write(t, options_req))
 			goto exit_error;
 	} else {
 		tc_printf(t, "usage: monitor option erase\n");
-		tc_printf(t, "usage: monitor option <addr> <value>\n");
-		tc_printf(t, "usage: monitor option write <%u values> ...\n",
-		          NB_OPT);
+		tc_printf(t, "usage: monitor option write <<addr val> ...>\n");
+		display_registers(t, options_def, NB_REG_OPT);
 	}
-
-	for (i = 0U; i < NB_OPT; i++) {
-		val = target_mem_read32(t, options_def[i].addr);
-		tc_printf(t, "0x%08X: 0x%08X\n", options_def[i].addr, val);
-	}
-
 	goto exit_cleanup;
 
 exit_error:
 	tc_printf(t, "Writing options failed!\n");
 	ret = false;
 exit_cleanup:
-	stm32g0_flash_lock(t); // Also locks option bytes
 	return ret;
 }
 
@@ -639,4 +707,53 @@ static bool stm32g0_cmd_otp(target *t, int argc, const char **argv)
 	(void)argc;
 	(void)argv;
 	return false; // TODO
+}
+
+enum dbg_registers {
+	DBG_CR_ENUM = 0,
+	DBG_APB_FZ1_ENUM,
+	DBG_APB_FZ2_ENUM,
+
+	NB_REG_DBG
+};
+
+// TODO add an empty row instead of having a NB_ enum
+static const struct registers_s dbg_def[NB_REG_DBG] = {
+	[DBG_CR_ENUM]      = {DBG_CR,      0x0},
+	[DBG_APB_FZ1_ENUM] = {DBG_APB_FZ1, 0x0},
+	[DBG_APB_FZ2_ENUM] = {DBG_APB_FZ2, 0x0}
+};
+
+static void stm32g0_dbg_write(target *t, const struct registers_s *dbg_req)
+{
+	stm32g0_dbg_clock_enable(t);
+	stm32g0_registers_write(t, dbg_req, NB_REG_DBG);
+	target_reset(t);
+}
+
+/*
+ * DBG registers write.
+ * Configures clocks and counters behaviour under debug.
+ */
+static bool stm32g0_cmd_dbg(target *t, int argc, const char **argv)
+{
+	struct registers_s dbg_req[NB_REG_DBG] = {{0U, 0U}};
+
+	if ((argc == 2) && !strcmp(argv[1], "erase"))
+		stm32g0_dbg_write(t, dbg_def);
+	else if ((argc > 2) && (argc % 2U == 0U) &&
+	           !strcmp(argv[1], "write")) {
+		if (!parse_cmdline_registers(argc - 2, argv + 2, dbg_req,
+		                                                 dbg_def,
+		                                                 NB_REG_DBG))
+			goto exit_cleanup;
+		stm32g0_dbg_write(t, dbg_req);
+	} else {
+		tc_printf(t, "usage: monitor dbg erase\n");
+		tc_printf(t, "usage: monitor dbg write <<addr val> ...>\n");
+		display_registers(t, dbg_def, NB_REG_DBG);
+	}
+
+exit_cleanup:
+	return true;
 }
