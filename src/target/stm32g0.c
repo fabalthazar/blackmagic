@@ -116,7 +116,7 @@
 #define RCC_APBENR1 (RCC_BASE + 0x3C)
 #define RCC_APBENR1_DBGEN (1U << 27U)
 
-/* DBG */
+/* DBGMCU */
 #define DBG_BASE 0x40015800
 #define DBG_IDCODE (DBG_BASE + 0x00)
 #define DBG_DEV_ID_MASK 0x00000FFF
@@ -142,8 +142,7 @@ enum STM32G0_DEV_ID {
 static char driver_name[DRIVER_NAME_LENGTH];
 
 static bool stm32g0_attach(target *t);
-//static void stm32g0_detach(target *t);
-//~ static void stm32g0_extended_reset(target *t);
+static void stm32g0_detach(target *t);
 static int stm32g0_flash_erase(struct target_flash *f,
                                target_addr addr, size_t len);
 static int stm32g0_flash_write(struct target_flash *f,
@@ -161,7 +160,6 @@ static bool stm32g0_cmd_erase_bank1(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_erase_bank2(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_otp(target *t, int argc, const char **argv);
-static bool stm32g0_cmd_dbg(target *t, int argc, const char **argv);
 
 // TODO commands availability depending on chips
 const struct command_s stm32g0_cmd_list[] = {
@@ -170,7 +168,6 @@ const struct command_s stm32g0_cmd_list[] = {
 	{"erase_bank2", (cmd_handler)stm32g0_cmd_erase_bank2, "Erase entire bank2 flash memory"},
 	{"option", (cmd_handler)stm32g0_cmd_option, "Manipulate option bytes"},
 	{"otp", (cmd_handler)stm32g0_cmd_otp, "Write the OTP area (irreversible)"}, // TODO
-	{"dbg", (cmd_handler)stm32g0_cmd_dbg, "Write DBG registers"},
 	{NULL, NULL, NULL}
 };
 
@@ -227,7 +224,7 @@ bool stm32g0_probe(target *t)
 
 	t->driver = driver_name;
 	t->attach = stm32g0_attach;
-	//t->detach = stm32g0_detach;
+	t->detach = stm32g0_detach;
 	target_add_commands(t, stm32g0_cmd_list, driver_name);
 	return true;
 }
@@ -246,17 +243,14 @@ static void stm32g0_dbg_clock_enable(target *t)
  * keeps the FCLK and HCLK clocks running in Standby and Stop modes while
  * debugging.
  * Populates the memory map and add custom commands.
- * TODO explain connected_under_reset
  */
 static bool stm32g0_attach(target *t)
 {
 	uint32_t ram_size = 0U;
-	bool connected_under_reset = platform_srst_get_val();
 
 	if (!cortexm_attach(t))
 		return false;
 
-	/* Debug in low power mode will be effective on the next reset */
 	stm32g0_dbg_clock_enable(t);
 	target_mem_write32(t, DBG_CR, (uint32_t)(DBG_CR_DBG_STANDBY |
 	                                         DBG_CR_DBG_STOP));
@@ -287,18 +281,12 @@ static bool stm32g0_attach(target *t)
 	/* Dual banks: contiguous in memory */
 	stm32g0_add_flash(t, FLASH_START, flash_size, FLASH_PAGE_SIZE);
 
-	// TODO review
-	if (connected_under_reset)
-		target_reset(t); // Applies debug in low power mode
-
 	return true;
 }
 
 /*
  * Reset the target-specific debug registers and detach the debug core.
- * TODO this may be useless as DBG_CR has effect if debugger attached only.
  */
- #if 0
 static void stm32g0_detach(target *t)
 {
 	uint32_t dbg_cr = target_mem_read32(t, DBG_CR);
@@ -307,7 +295,6 @@ static void stm32g0_detach(target *t)
 
 	cortexm_detach(t);
 }
-#endif
 
 static void stm32g0_flash_unlock(target *t)
 {
@@ -388,7 +375,7 @@ static int stm32g0_flash_erase(struct target_flash *f,
 	/* Check for error */
 	uint32_t flash_sr = target_mem_read32(t, FLASH_SR);
 	if (flash_sr & FLASH_SR_ERROR_MASK) {
-		DEBUG_WARN("stm32g0 flash erase: sr error: 0x%" PRIu32 "\n", flash_sr);
+		DEBUG_WARN("stm32g0 flash erase error: sr 0x%" PRIu32 "\n", flash_sr);
 		goto exit_error;
 	}
 	goto exit_cleanup;
@@ -404,7 +391,6 @@ exit_cleanup:
 /*
  * Flash programming function.
  * The SR is supposed to be free of any error and not busy.
- * TODO try fast programming if SWD speed permits it without a MISSERR error.
  */
 static int stm32g0_flash_write(struct target_flash *f,
                                target_addr dest, const void *src, size_t len)
@@ -454,6 +440,8 @@ exit_cleanup:
 static bool stm32g0_cmd_erase(target *t, uint32_t action_mer)
 {
 	bool ret = true;
+
+	// TODO clear previous error
 
 	stm32g0_flash_unlock(t);
 
@@ -541,8 +529,6 @@ struct registers_s {
  * IRH and BOR are reserved on G0x0, it is safe to apply G0x1 options.
  * The same for PCROP and SECR.
  */
-
-// TODO add an empty row instead of having a NB_ enum
 static const struct registers_s options_def[NB_REG_OPT] = {
 	[OPTR_ENUM]      = {FLASH_OPTR,      0xFFFFFEAA}, // DFFFE1AA in G0x0
 	[PCROP1ASR_ENUM] = {FLASH_PCROP1ASR, 0xFFFFFFFF},
@@ -570,8 +556,7 @@ static void stm32g0_registers_write(target *t, const struct registers_s *regs,
 }
 
 /*
- * Option bytes programming
- * TODO reconnect after options launch.
+ * Option bytes programming.
  */
 static bool stm32g0_option_write(target *t,
                                  const struct registers_s *options_req)
@@ -603,7 +588,7 @@ static bool stm32g0_option_write(target *t,
 exit_error:
 	stm32g0_flash_lock(t); // Also locks option bytes
 	ret = false;
-exit_cleanup: // TODO
+exit_cleanup:
 	return ret;
 }
 
@@ -701,59 +686,13 @@ exit_cleanup:
 	return ret;
 }
 
+/*
+ * TODO transform this function into irreversible operations enable|disable
+ */
 static bool stm32g0_cmd_otp(target *t, int argc, const char **argv)
 {
 	(void)t;
 	(void)argc;
 	(void)argv;
 	return false; // TODO
-}
-
-enum dbg_registers {
-	DBG_CR_ENUM = 0,
-	DBG_APB_FZ1_ENUM,
-	DBG_APB_FZ2_ENUM,
-
-	NB_REG_DBG
-};
-
-// TODO add an empty row instead of having a NB_ enum
-static const struct registers_s dbg_def[NB_REG_DBG] = {
-	[DBG_CR_ENUM]      = {DBG_CR,      0x0},
-	[DBG_APB_FZ1_ENUM] = {DBG_APB_FZ1, 0x0},
-	[DBG_APB_FZ2_ENUM] = {DBG_APB_FZ2, 0x0}
-};
-
-static void stm32g0_dbg_write(target *t, const struct registers_s *dbg_req)
-{
-	stm32g0_dbg_clock_enable(t);
-	stm32g0_registers_write(t, dbg_req, NB_REG_DBG);
-	target_reset(t);
-}
-
-/*
- * DBG registers write.
- * Configures clocks and counters behaviour under debug.
- */
-static bool stm32g0_cmd_dbg(target *t, int argc, const char **argv)
-{
-	struct registers_s dbg_req[NB_REG_DBG] = {{0U, 0U}};
-
-	if ((argc == 2) && !strcmp(argv[1], "erase"))
-		stm32g0_dbg_write(t, dbg_def);
-	else if ((argc > 2) && (argc % 2U == 0U) &&
-	           !strcmp(argv[1], "write")) {
-		if (!parse_cmdline_registers(argc - 2, argv + 2, dbg_req,
-		                                                 dbg_def,
-		                                                 NB_REG_DBG))
-			goto exit_cleanup;
-		stm32g0_dbg_write(t, dbg_req);
-	} else {
-		tc_printf(t, "usage: monitor dbg erase\n");
-		tc_printf(t, "usage: monitor dbg write <<addr val> ...>\n");
-		display_registers(t, dbg_def, NB_REG_DBG);
-	}
-
-exit_cleanup:
-	return true;
 }
