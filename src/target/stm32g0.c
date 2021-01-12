@@ -38,16 +38,21 @@
 #include "target.h"
 #include "target_internal.h"
 #include "cortexm.h"
+#include "command.h"
 
 /* FLASH */
-#define FLASH_START 0x8000000
+#define FLASH_START 0x08000000
 #define FLASH_MEMORY_SIZE 0x1FFF75E0
 #define FLASH_PAGE_SIZE 0x800
 #define FLASH_BANK2_START_PAGE_NB 256U
+// TODO cleanup
 //#define FLASH_BANK_SIZE_128kB 0x20000
 //#define FLASH_BANK_SIZE_256kB 0x40000
 
 #define FLASH_BASE 0x40022000
+#define FLASH_ACR (FLASH_BASE + 0x000)
+#define FLASH_ACR_EMPTY (1U << 16U)
+
 #define FLASH_KEYR (FLASH_BASE + 0x008)
 #define FLASH_KEYR_KEY1 0x45670123
 #define FLASH_KEYR_KEY2 0xCDEF89AB
@@ -90,6 +95,7 @@
 #define FLASH_OPTKEYR_KEY2 0x4C5D6E7F
 #define FLASH_OPTR (FLASH_BASE + 0x020)
 #define FLASH_OPTR_DUAL_BANK (1U << 21U)
+#define FLASH_OPTR_RDP_MASK 0xFF
 #define FLASH_PCROP1ASR (FLASH_BASE + 0x024)
 #define FLASH_PCROP1AER (FLASH_BASE + 0x028)
 #define FLASH_WRP1AR (FLASH_BASE + 0x02C)
@@ -126,11 +132,10 @@
 #define DBG_CR_DBG_STOP (1U << 1U)
 #define DBG_APB_FZ1 (DBG_BASE + 0x08)
 #define DBG_APB_FZ2 (DBG_BASE + 0x0C)
-// TODO delete:
+// TODO cleanup
 #define DBG_APB_FZ1_DBG_IWDG_STOP (1U << 12U)
 #define DBG_APB_FZ1_DBG_WWDG_STOP (1U << 11U)
 
-/* TODO dev ids */
 enum STM32G0_DEV_ID {
 	STM32G03_4 = 0x466,
 	STM32G05_6 = 0x456,
@@ -140,6 +145,9 @@ enum STM32G0_DEV_ID {
 
 #define DRIVER_NAME_LENGTH 12
 static char driver_name[DRIVER_NAME_LENGTH];
+static bool irreversible_enabled = false;
+static const char *help_option_common = "usage: monitor option ";
+static const char *irreversible_message = "Irreversible operations disabled\n";
 
 static bool stm32g0_attach(target *t);
 static void stm32g0_detach(target *t);
@@ -159,15 +167,19 @@ static bool stm32g0_cmd_erase_mass(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_erase_bank1(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_erase_bank2(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv);
-static bool stm32g0_cmd_otp(target *t, int argc, const char **argv);
+static bool stm32g0_cmd_irreversible(target *t, int argc, const char **argv);
 
-// TODO commands availability depending on chips
 const struct command_s stm32g0_cmd_list[] = {
-	{"erase_mass", (cmd_handler)stm32g0_cmd_erase_mass, "Erase entire flash memory"},
-	{"erase_bank1", (cmd_handler)stm32g0_cmd_erase_bank1, "Erase entire bank1 flash memory"},
-	{"erase_bank2", (cmd_handler)stm32g0_cmd_erase_bank2, "Erase entire bank2 flash memory"},
-	{"option", (cmd_handler)stm32g0_cmd_option, "Manipulate option bytes"},
-	{"otp", (cmd_handler)stm32g0_cmd_otp, "Write the OTP area (irreversible)"}, // TODO
+	{"erase_mass", (cmd_handler)stm32g0_cmd_erase_mass,
+	                 "Erase entire flash memory"},
+	{"erase_bank1", (cmd_handler)stm32g0_cmd_erase_bank1,
+	                 "Erase entire bank1 flash memory"},
+	{"erase_bank2", (cmd_handler)stm32g0_cmd_erase_bank2,
+	                 "Erase entire bank2 flash memory"},
+	{"option", (cmd_handler)stm32g0_cmd_option,
+	                 "Manipulate option bytes"},
+	{"irreversible", (cmd_handler)stm32g0_cmd_irreversible,
+	                 "Allow irreversible operations: (enable|disable)"},
 	{NULL, NULL, NULL}
 };
 
@@ -192,15 +204,11 @@ static void stm32g0_add_flash(target *t,
 
 /*
  * Probe for a known STM32G0 MCU.
- * Uses a static common driver name for flash usage purpose.
  */
 bool stm32g0_probe(target *t)
 {
 	driver_name[0] = '\0';
 	strcat(driver_name, "STM32G0");
-	// TODO cleanup
-	//uint16_t dev_id = (uint16_t)(target_mem_read32(t, DBG_IDCODE) & DBG_DEV_ID_MASK);
-	//switch (dev_id) {
 	switch (t->idcode) {
 	case STM32G03_4:
 		/* SRAM 8 kB, Flash up to 64 kB */
@@ -311,7 +319,6 @@ static void stm32g0_flash_lock(target *t)
 
 /*
  * Flash erasing function.
- * TODO check PCROP & WRP option bytes before attempting to erase?
  * TODO perform a MER if len covers all pages (check start and end).
  */
 static int stm32g0_flash_erase(struct target_flash *f,
@@ -391,6 +398,8 @@ exit_cleanup:
 /*
  * Flash programming function.
  * The SR is supposed to be free of any error and not busy.
+ * After a successful programming, the EMPTY bit is cleared to allow rebooting
+ * in Main Flash memory without powering off.
  */
 static int stm32g0_flash_write(struct target_flash *f,
                                target_addr dest, const void *src, size_t len)
@@ -419,6 +428,12 @@ static int stm32g0_flash_write(struct target_flash *f,
 		DEBUG_WARN("stm32g0 flash write error: sr 0x%" PRIu32 "\n", flash_sr);
 		goto exit_error;
 	}
+	if ((dest == (target_addr)FLASH_START) &&
+	    target_mem_read32(t, FLASH_START) != 0xFFFFFFFF) {
+		uint32_t flash_acr = target_mem_read32(t, FLASH_ACR);
+		flash_acr &= ~(uint32_t)FLASH_ACR_EMPTY;
+		target_mem_write32(t, FLASH_ACR, flash_acr);
+	}
 	goto exit_cleanup;
 
 exit_error:
@@ -431,12 +446,15 @@ exit_cleanup:
 	return ret;
 }
 
+/**********************************
+ * Custom commands
+ *********************************/
 /*
  * Custom commands.
- * TODO PCROP_RDP + WRP.
  * TODO write OTP area. This can be done by standard programming in a usual
  * flash region without prior erasing.
  */
+
 static bool stm32g0_cmd_erase(target *t, uint32_t action_mer)
 {
 	bool ret = true;
@@ -524,13 +542,11 @@ struct registers_s {
  * G0x0: OPTR = DFFFE1AA
  * 1101 1111 1111 1111 1110 0001 1010 1010
  *   *IRHEN               * ****BOREN
- *                        BORF_LEV = 11 (2.8 V) / 00 (2.0 V)
- *                        BORR_LEV = 11 (2.9 V) / 00 (2.1 V)
  * IRH and BOR are reserved on G0x0, it is safe to apply G0x1 options.
  * The same for PCROP and SECR.
  */
 static const struct registers_s options_def[NB_REG_OPT] = {
-	[OPTR_ENUM]      = {FLASH_OPTR,      0xFFFFFEAA}, // DFFFE1AA in G0x0
+	[OPTR_ENUM]      = {FLASH_OPTR,      0xFFFFFEAA},
 	[PCROP1ASR_ENUM] = {FLASH_PCROP1ASR, 0xFFFFFFFF},
 	[PCROP1AER_ENUM] = {FLASH_PCROP1AER, 0x00000000},
 	[WRP1AR_ENUM]    = {FLASH_WRP1AR,    0x000000FF},
@@ -546,7 +562,7 @@ static const struct registers_s options_def[NB_REG_OPT] = {
 	[SECR_ENUM]      = {FLASH_SECR,      0x00000000}
 };
 
-static void stm32g0_registers_write(target *t, const struct registers_s *regs,
+static void write_registers(target *t, const struct registers_s *regs,
                                     uint8_t nb_regs)
 {
 	for (uint8_t i = 0U; i < nb_regs; i++) {
@@ -557,6 +573,7 @@ static void stm32g0_registers_write(target *t, const struct registers_s *regs,
 
 /*
  * Option bytes programming.
+ * TODO attach the target again after the option bytes loaded
  */
 static bool stm32g0_option_write(target *t,
                                  const struct registers_s *options_req)
@@ -572,7 +589,7 @@ static bool stm32g0_option_write(target *t,
 			goto exit_error;
 	}
 
-	stm32g0_registers_write(t, options_req, NB_REG_OPT);
+	write_registers(t, options_req, NB_REG_OPT);
 
 	target_mem_write32(t, FLASH_CR, FLASH_CR_OPTSTRT);
 	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY_MASK) {
@@ -602,18 +619,14 @@ static bool add_reg_value(struct registers_s *reg_req,
                           uint32_t addr,
                           uint32_t val)
 {
-	bool ret = false;
-
 	for (uint8_t j = 0U; j < reg_def_len; j++) {
 		if (addr == reg_def[j].addr) {
 			reg_req[j].addr = addr;
 			reg_req[j].val = val;
-			ret = true;
-			break;
+			return true;
 		}
 	}
-
-	return ret;
+	return false;
 }
 
 /*
@@ -641,6 +654,19 @@ static bool parse_cmdline_registers(int args_nb, const char **reg_str,
 		return false;
 }
 
+/*
+ * Validates option bytes.
+ */
+static bool validate_options(target *t, const struct registers_s *options_req)
+{
+	if (((options_req[OPTR_ENUM].val & FLASH_OPTR_RDP_MASK) ==
+	    (uint32_t)0xCC) && !irreversible_enabled) {
+		tc_printf(t, irreversible_message);
+		return false;
+	}
+	return true;
+}
+
 static void display_registers(target *t, const struct registers_s *reg_def,
                               uint8_t len)
 {
@@ -654,7 +680,6 @@ static void display_registers(target *t, const struct registers_s *reg_def,
 
 /*
  * Option bytes manipulating.
- * TODO check PCROP_RDP deselect if not RDP Level 1?
  */
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 {
@@ -669,12 +694,16 @@ static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 		if (!parse_cmdline_registers(argc - 2, argv + 2, options_req,
 		                                                 options_def,
 		                                                 NB_REG_OPT))
-			goto exit_cleanup;
+			goto exit_error;
+		if (!validate_options(t, options_req))
+			goto exit_error;
 		if (!stm32g0_option_write(t, options_req))
 			goto exit_error;
 	} else {
-		tc_printf(t, "usage: monitor option erase\n");
-		tc_printf(t, "usage: monitor option write <<addr val> ...>\n");
+		tc_printf(t, help_option_common);
+		tc_printf(t, "erase\n");
+		tc_printf(t, help_option_common);
+		tc_printf(t, "write <<addr val> ...>\n");
 		display_registers(t, options_def, NB_REG_OPT);
 	}
 	goto exit_cleanup;
@@ -687,12 +716,20 @@ exit_cleanup:
 }
 
 /*
- * TODO transform this function into irreversible operations enable|disable
+ * Enables irreversible operations:
+ * Level 2 RDP read protection;
+ * OTP Flash area programming. TODO
  */
-static bool stm32g0_cmd_otp(target *t, int argc, const char **argv)
+static bool stm32g0_cmd_irreversible(target *t, int argc, const char **argv)
 {
 	(void)t;
-	(void)argc;
-	(void)argv;
-	return false; // TODO
+	bool ret = true;
+
+	if (argc == 2) {
+		if (!parse_enable_or_disable(argv[1], &irreversible_enabled))
+			ret = false;
+	}
+	tc_printf(t, "Irreversible operations: %s\n",
+		 irreversible_enabled ? "enabled" : "disabled");
+	return ret;
 }
