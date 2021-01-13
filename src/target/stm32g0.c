@@ -132,7 +132,6 @@
 #define DBG_CR_DBG_STOP (1U << 1U)
 #define DBG_APB_FZ1 (DBG_BASE + 0x08)
 #define DBG_APB_FZ2 (DBG_BASE + 0x0C)
-// TODO cleanup
 #define DBG_APB_FZ1_DBG_IWDG_STOP (1U << 12U)
 #define DBG_APB_FZ1_DBG_WWDG_STOP (1U << 11U)
 
@@ -155,8 +154,6 @@ static int stm32g0_flash_erase(struct target_flash *f,
                                target_addr addr, size_t len);
 static int stm32g0_flash_write(struct target_flash *f,
                                target_addr dest, const void *src, size_t len);
-//static void stm32g0_flash_unlock(target *t);
-//static void stm32g0_flash_lock(target *t);
 //static bool stm32g0_is_dual_bank_splitted(target *t)
 //{
 	//return ((target_mem_read32(t, FLASH_OPTR) & FLASH_OPTR_DUAL_BANK) > 0U);
@@ -224,7 +221,7 @@ bool stm32g0_probe(target *t)
 		break;
 	case STM32G0B_C:
 		/* SRAM 144 kB, Flash up to 512 kB */
-		strcat(driver_name, "B/C"); // TODO test this device
+		strcat(driver_name, "B/C"); // TODO test these devices
 		break;
 	default:
 		return false;
@@ -250,6 +247,9 @@ static void stm32g0_dbg_clock_enable(target *t)
  * In addition to attaching the debug core with cortexm_attach(), this function
  * keeps the FCLK and HCLK clocks running in Standby and Stop modes while
  * debugging.
+ * The watchdogs (IWDG and WWDG) are stopped when the core is halted. This
+ * allows basic Flash operations (erase/write) if the watchdog is started by
+ * hardware or by a previous program without power off.
  * Populates the memory map and add custom commands.
  */
 static bool stm32g0_attach(target *t)
@@ -262,6 +262,10 @@ static bool stm32g0_attach(target *t)
 	stm32g0_dbg_clock_enable(t);
 	target_mem_write32(t, DBG_CR, (uint32_t)(DBG_CR_DBG_STANDBY |
 	                                         DBG_CR_DBG_STOP));
+	uint32_t dbg_apb_fz1 = target_mem_read32(t, DBG_APB_FZ1);
+	dbg_apb_fz1 |= (uint32_t)(DBG_APB_FZ1_DBG_IWDG_STOP |
+	                          DBG_APB_FZ1_DBG_WWDG_STOP);
+	target_mem_write32(t, DBG_APB_FZ1, dbg_apb_fz1);
 
 	target_mem_map_free(t);
 
@@ -407,6 +411,7 @@ static int stm32g0_flash_write(struct target_flash *f,
 	target *t = f->t;
 	int ret = 0;
 
+	// TODO cleanup
 	/* Clear any previous programming error */
 	//target_mem_write32(t, FLASH_SR, target_mem_read32(t, FLASH_SR));
 
