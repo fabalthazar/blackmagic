@@ -45,9 +45,6 @@
 #define FLASH_MEMORY_SIZE 0x1FFF75E0
 #define FLASH_PAGE_SIZE 0x800
 #define FLASH_BANK2_START_PAGE_NB 256U
-// TODO cleanup
-//#define FLASH_BANK_SIZE_128kB 0x20000
-//#define FLASH_BANK_SIZE_256kB 0x40000
 
 #define FLASH_BASE 0x40022000
 #define FLASH_ACR (FLASH_BASE + 0x000)
@@ -98,6 +95,7 @@
 #define FLASH_OPTR_RDP_MASK 0xFF
 #define FLASH_PCROP1ASR (FLASH_BASE + 0x024)
 #define FLASH_PCROP1AER (FLASH_BASE + 0x028)
+#define FLASH_PCROP1AER_PCROP_RDP (1U << 31U)
 #define FLASH_WRP1AR (FLASH_BASE + 0x02C)
 #define FLASH_WRP1BR (FLASH_BASE + 0x030)
 #define FLASH_PCROP1BSR (FLASH_BASE + 0x034)
@@ -154,10 +152,6 @@ static int stm32g0_flash_erase(struct target_flash *f,
                                target_addr addr, size_t len);
 static int stm32g0_flash_write(struct target_flash *f,
                                target_addr dest, const void *src, size_t len);
-//static bool stm32g0_is_dual_bank_splitted(target *t)
-//{
-	//return ((target_mem_read32(t, FLASH_OPTR) & FLASH_OPTR_DUAL_BANK) > 0U);
-//}
 
 /* Custom commands */
 static bool stm32g0_cmd_erase_mass(target *t, int argc, const char **argv);
@@ -249,8 +243,10 @@ static void stm32g0_dbg_clock_enable(target *t)
  * debugging.
  * The watchdogs (IWDG and WWDG) are stopped when the core is halted. This
  * allows basic Flash operations (erase/write) if the watchdog is started by
- * hardware or by a previous program without power off.
- * Populates the memory map and add custom commands.
+ * hardware or by a previous program without prior power off. Particularly
+ * useful with hosted blackmagic binary write where the debug registers cannot
+ * be written.
+ * Populate the memory map and add custom commands.
  */
 static bool stm32g0_attach(target *t)
 {
@@ -286,7 +282,7 @@ static bool stm32g0_attach(target *t)
 		ram_size = RAM_SIZE_G0B_C;
 		break;
 	default:
-		/* Should not fall here */
+		/* Should not reach here */
 		return false;
 	}
 	target_add_ram(t, RAM_START, ram_size);
@@ -322,7 +318,7 @@ static void stm32g0_flash_lock(target *t)
 }
 
 /*
- * Flash erasing function.
+ * Flash erasure function.
  * TODO perform a MER if len covers all pages (check start and end).
  */
 static int stm32g0_flash_erase(struct target_flash *f,
@@ -339,7 +335,7 @@ static int stm32g0_flash_erase(struct target_flash *f,
 
 	uint16_t page_nb = (uint16_t)((addr - f->start) / f->blocksize);
 
-	if (t->idcode == STM32G0B_C) { // Dual bank devices
+	if (t->idcode == STM32G0B_C) { // Dual-bank devices
 		bank1_end_page_nb = ((f->length / 2U) - 1U) / f->blocksize;
 		bank2_start_addr = f->start + (f->length / 2U);
 		if (page_nb > bank1_end_page_nb) { // On bank 2
@@ -349,7 +345,7 @@ static int stm32g0_flash_erase(struct target_flash *f,
 		}
 	}
 
-	/* Wait for Flash not busy */
+	/* Wait for Flash ready */
 	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY_MASK) {
 		if (target_check_error(t))
 			goto exit_error;
@@ -401,7 +397,7 @@ exit_cleanup:
 
 /*
  * Flash programming function.
- * The SR is supposed to be free of any error and not busy.
+ * The SR is supposed to be ready and free of any error.
  * After a successful programming, the EMPTY bit is cleared to allow rebooting
  * in Main Flash memory without powering off.
  */
@@ -410,10 +406,6 @@ static int stm32g0_flash_write(struct target_flash *f,
 {
 	target *t = f->t;
 	int ret = 0;
-
-	// TODO cleanup
-	/* Clear any previous programming error */
-	//target_mem_write32(t, FLASH_SR, target_mem_read32(t, FLASH_SR));
 
 	stm32g0_flash_unlock(t);
 
@@ -457,14 +449,12 @@ exit_cleanup:
 /*
  * Custom commands.
  * TODO write OTP area. This can be done by standard programming in a usual
- * flash region without prior erasing.
+ * flash region without prior erasure.
  */
 
 static bool stm32g0_cmd_erase(target *t, uint32_t action_mer)
 {
 	bool ret = true;
-
-	// TODO clear previous error
 
 	stm32g0_flash_unlock(t);
 
@@ -578,17 +568,14 @@ static void write_registers(target *t, const struct registers_s *regs,
 
 /*
  * Option bytes programming.
- * TODO attach the target again after the option bytes loaded
  */
 static bool stm32g0_option_write(target *t,
                                  const struct registers_s *options_req)
 {
-	bool ret = true;
-
 	stm32g0_flash_unlock(t);
 	stm32g0_flash_option_unlock(t);
 
-	/* Wait for Flash not busy */
+	/* Wait for Flash ready */
 	while (target_mem_read32(t, FLASH_SR) & FLASH_SR_BSY_MASK) {
 		if (target_check_error(t))
 			goto exit_error;
@@ -605,18 +592,17 @@ static bool stm32g0_option_write(target *t,
 	/* Option bytes loading generates a system reset */
 	target_mem_write32(t, FLASH_CR, FLASH_CR_OBL_LAUNCH);
 	tc_printf(t, "Scan and attach again\n");
-	goto exit_cleanup;
+	return true;
 
 exit_error:
 	stm32g0_flash_lock(t); // Also locks option bytes
-	ret = false;
-exit_cleanup:
-	return ret;
+	return false;
 }
 
-
 /*
- * Adds a valid register to the required table (registers to be applied).
+ * This fonction adds a register given on the command line to a table.
+ * This table is further written to the target.
+ * The register is added only if its address is valid.
  */
 static bool add_reg_value(struct registers_s *reg_req,
                           const struct registers_s *reg_def,
@@ -661,6 +647,7 @@ static bool parse_cmdline_registers(int args_nb, const char **reg_str,
 
 /*
  * Validates option bytes.
+ * Prevents RDP level 2 request if not explicitly allowed.
  */
 static bool validate_options(target *t, const struct registers_s *options_req)
 {
@@ -683,16 +670,59 @@ static void display_registers(target *t, const struct registers_s *reg_def,
 	}
 }
 
+static bool stm32g0_is_PCROP_active(target *t)
+{
+	if (((target_mem_read32(t, FLASH_PCROP1AER) &
+	      ~(uint32_t)FLASH_PCROP1AER_PCROP_RDP) >
+	     target_mem_read32(t, FLASH_PCROP1ASR)) ||
+	    (target_mem_read32(t, FLASH_PCROP1BER) >
+	     target_mem_read32(t, FLASH_PCROP1BSR)) ||
+	    (target_mem_read32(t, FLASH_PCROP2AER) >
+	     target_mem_read32(t, FLASH_PCROP2ASR)) ||
+	    (target_mem_read32(t, FLASH_PCROP2BER) >
+	     target_mem_read32(t, FLASH_PCROP2BSR))) {
+		return true;
+	}
+	return false;
+}
+
+/*
+ * Erasure is done in two steps if Proprietary Code Read Out Protection is active.
+ * Step 1: increase RDP level and set PCROP_RDP if not already the case;
+ * Step 2: reset to defaults.
+ */
+static bool stm32g0_option_erase(target *t, struct registers_s *reg_req)
+{
+	uint32_t optr = target_mem_read32(t, FLASH_OPTR);
+	uint32_t pcrop1aer = target_mem_read32(t, FLASH_PCROP1AER);
+	bool rdp_level0 = (optr & FLASH_OPTR_RDP_MASK) == (uint32_t)0xAA;
+	bool pcrop_rdp = (pcrop1aer & (uint32_t)FLASH_PCROP1AER_PCROP_RDP) > 0U;
+
+	if (stm32g0_is_PCROP_active(t) && (!pcrop_rdp || rdp_level0)) {
+		/* Step 1 */
+		optr |= (uint32_t)0xFF;
+		reg_req[OPTR_ENUM].addr = options_def[OPTR_ENUM].addr;
+		reg_req[OPTR_ENUM].val = optr;
+		reg_req[PCROP1AER_ENUM].addr = options_def[PCROP1AER_ENUM].addr;
+		reg_req[PCROP1AER_ENUM].val = pcrop1aer |
+				         (uint32_t)FLASH_PCROP1AER_PCROP_RDP;
+		tc_printf(t, "Process again to complete erasure\n");
+		return stm32g0_option_write(t, reg_req);
+	} else {
+		/* Step 2 */
+		return stm32g0_option_write(t, options_def);
+	}
+}
+
 /*
  * Option bytes manipulating.
  */
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 {
-	bool ret = true;
 	struct registers_s options_req[NB_REG_OPT] = {{0U, 0U}};
 
 	if ((argc == 2) && !strcmp(argv[1], "erase")) {
-		if (!stm32g0_option_write(t, options_def))
+		if (!stm32g0_option_erase(t, options_req))
 			goto exit_error;
 	} else if ((argc > 2) && (argc % 2U == 0U) &&
 	           !strcmp(argv[1], "write")) {
@@ -711,18 +741,16 @@ static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 		tc_printf(t, "write <<addr val> ...>\n");
 		display_registers(t, options_def, NB_REG_OPT);
 	}
-	goto exit_cleanup;
+	return true;
 
 exit_error:
 	tc_printf(t, "Writing options failed!\n");
-	ret = false;
-exit_cleanup:
-	return ret;
+	return false;
 }
 
 /*
  * Enables irreversible operations:
- * Level 2 RDP read protection;
+ * RDP level 2 read protection;
  * OTP Flash area programming. TODO
  */
 static bool stm32g0_cmd_irreversible(target *t, int argc, const char **argv)
