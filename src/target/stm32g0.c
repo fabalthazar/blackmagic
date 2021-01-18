@@ -80,11 +80,11 @@
 #define FLASH_SR_PROGERR (1U << 3U)
 #define FLASH_SR_OPERR (1U << 1U)
 #define FLASH_SR_EOP (1U << 0U)
-#define FLASH_SR_ERROR_MASK (FLASH_SR_OPTVERR | FLASH_SR_RDERR | \
-                             FLASH_SR_FASTERR | FLASH_SR_MISSERR | \
-                             FLASH_SR_PGSERR | FLASH_SR_SIZERR | \
-                             FLASH_SR_PGAERR | FLASH_SR_WRPERR | \
-                             FLASH_SR_PROGERR | FLASH_SR_OPERR)
+#define FLASH_SR_ERROR_MASK                                                    \
+	(FLASH_SR_OPTVERR | FLASH_SR_RDERR | FLASH_SR_FASTERR |                \
+	 FLASH_SR_MISSERR | FLASH_SR_PGSERR | FLASH_SR_SIZERR |                \
+	 FLASH_SR_PGAERR | FLASH_SR_WRPERR | FLASH_SR_PROGERR |                \
+	 FLASH_SR_OPERR)
 #define FLASH_SR_BSY_MASK (FLASH_SR_BSY2 | FLASH_SR_BSY1)
 
 #define FLASH_OPTKEYR (G0_FLASH_BASE + 0x00C)
@@ -148,10 +148,10 @@ static const char *irreversible_message = "Irreversible operations disabled\n";
 
 static bool stm32g0_attach(target *t);
 static void stm32g0_detach(target *t);
-static int stm32g0_flash_erase(struct target_flash *f,
-                               target_addr addr, size_t len);
-static int stm32g0_flash_write(struct target_flash *f,
-                               target_addr dest, const void *src, size_t len);
+static int stm32g0_flash_erase(struct target_flash *f, target_addr addr,
+			       size_t len);
+static int stm32g0_flash_write(struct target_flash *f, target_addr dest,
+			       const void *src, size_t len);
 
 /* Custom commands */
 static bool stm32g0_cmd_erase_mass(target *t, int argc, const char **argv);
@@ -161,24 +161,24 @@ static bool stm32g0_cmd_option(target *t, int argc, const char **argv);
 static bool stm32g0_cmd_irreversible(target *t, int argc, const char **argv);
 
 const struct command_s stm32g0_cmd_list[] = {
-	{"erase_mass", (cmd_handler)stm32g0_cmd_erase_mass,
-	                 "Erase entire flash memory"},
-	{"erase_bank1", (cmd_handler)stm32g0_cmd_erase_bank1,
-	                 "Erase entire bank1 flash memory"},
-	{"erase_bank2", (cmd_handler)stm32g0_cmd_erase_bank2,
-	                 "Erase entire bank2 flash memory"},
-	{"option", (cmd_handler)stm32g0_cmd_option,
-	                 "Manipulate option bytes"},
-	{"irreversible", (cmd_handler)stm32g0_cmd_irreversible,
-	                 "Allow irreversible operations: (enable|disable)"},
-	{NULL, NULL, NULL}
+	{ "erase_mass", (cmd_handler)stm32g0_cmd_erase_mass,
+	  "Erase entire flash memory" },
+	{ "erase_bank1", (cmd_handler)stm32g0_cmd_erase_bank1,
+	  "Erase entire bank1 flash memory" },
+	{ "erase_bank2", (cmd_handler)stm32g0_cmd_erase_bank2,
+	  "Erase entire bank2 flash memory" },
+	{ "option", (cmd_handler)stm32g0_cmd_option,
+	  "Manipulate option bytes" },
+	{ "irreversible", (cmd_handler)stm32g0_cmd_irreversible,
+	  "Allow irreversible operations: (enable|disable)" },
+	{ NULL, NULL, NULL }
 };
 
-static void stm32g0_add_flash(target *t,
-                              uint32_t addr, size_t length, size_t blocksize)
+static void stm32g0_add_flash(target *t, uint32_t addr, size_t length,
+			      size_t blocksize)
 {
 	struct target_flash *f = calloc(1, sizeof(*f));
-	if (!f) {			/* calloc failed: heap exhaustion */
+	if (!f) { /* calloc failed: heap exhaustion */
 		DEBUG_WARN("calloc: failed in %s\n", __func__);
 		return;
 	}
@@ -256,11 +256,11 @@ static bool stm32g0_attach(target *t)
 		return false;
 
 	stm32g0_dbg_clock_enable(t);
-	target_mem_write32(t, DBG_CR, (uint32_t)(DBG_CR_DBG_STANDBY |
-	                                         DBG_CR_DBG_STOP));
+	target_mem_write32(t, DBG_CR,
+			   (uint32_t)(DBG_CR_DBG_STANDBY | DBG_CR_DBG_STOP));
 	uint32_t dbg_apb_fz1 = target_mem_read32(t, DBG_APB_FZ1);
 	dbg_apb_fz1 |= (uint32_t)(DBG_APB_FZ1_DBG_IWDG_STOP |
-	                          DBG_APB_FZ1_DBG_WWDG_STOP);
+				  DBG_APB_FZ1_DBG_WWDG_STOP);
 	target_mem_write32(t, DBG_APB_FZ1, dbg_apb_fz1);
 
 	target_mem_map_free(t);
@@ -321,8 +321,8 @@ static void stm32g0_flash_lock(target *t)
  * Flash erasure function.
  * TODO perform a MER if len covers all pages (check start and end).
  */
-static int stm32g0_flash_erase(struct target_flash *f,
-                               target_addr addr, size_t len)
+static int stm32g0_flash_erase(struct target_flash *f, target_addr addr,
+			       size_t len)
 {
 	target *t = f->t;
 	target_addr end = addr + len - 1U;
@@ -340,8 +340,8 @@ static int stm32g0_flash_erase(struct target_flash *f,
 		bank2_start_addr = f->start + (f->length / 2U);
 		if (page_nb > bank1_end_page_nb) { // On bank 2
 			page_nb = FLASH_BANK2_START_PAGE_NB +
-				  (uint16_t)((addr - bank2_start_addr)
-				             / f->blocksize);
+				  (uint16_t)((addr - bank2_start_addr) /
+					     f->blocksize);
 		}
 	}
 
@@ -357,8 +357,8 @@ static int stm32g0_flash_erase(struct target_flash *f,
 	stm32g0_flash_unlock(t);
 
 	while (len) {
-		uint32_t flash_cr = (uint32_t)((page_nb << FLASH_CR_PNB_SHIFT)
-		                               | FLASH_CR_PER);
+		uint32_t flash_cr = (uint32_t)((page_nb << FLASH_CR_PNB_SHIFT) |
+					       FLASH_CR_PER);
 		target_mem_write32(t, FLASH_CR, flash_cr);
 
 		flash_cr |= (uint32_t)FLASH_CR_STRT;
@@ -382,7 +382,8 @@ static int stm32g0_flash_erase(struct target_flash *f,
 	/* Check for error */
 	uint32_t flash_sr = target_mem_read32(t, FLASH_SR);
 	if (flash_sr & FLASH_SR_ERROR_MASK) {
-		DEBUG_WARN("stm32g0 flash erase error: sr 0x%" PRIu32 "\n", flash_sr);
+		DEBUG_WARN("stm32g0 flash erase error: sr 0x%" PRIu32 "\n",
+			   flash_sr);
 		goto exit_error;
 	}
 	goto exit_cleanup;
@@ -401,8 +402,8 @@ exit_cleanup:
  * After a successful programming, the EMPTY bit is cleared to allow rebooting
  * in Main Flash memory without powering off.
  */
-static int stm32g0_flash_write(struct target_flash *f,
-                               target_addr dest, const void *src, size_t len)
+static int stm32g0_flash_write(struct target_flash *f, target_addr dest,
+			       const void *src, size_t len)
 {
 	target *t = f->t;
 	int ret = 0;
@@ -422,7 +423,8 @@ static int stm32g0_flash_write(struct target_flash *f,
 	} while (flash_sr & FLASH_SR_BSY_MASK);
 
 	if (flash_sr & FLASH_SR_ERROR_MASK) {
-		DEBUG_WARN("stm32g0 flash write error: sr 0x%" PRIu32 "\n", flash_sr);
+		DEBUG_WARN("stm32g0 flash write error: sr 0x%" PRIu32 "\n",
+			   flash_sr);
 		goto exit_error;
 	}
 	if ((dest == (target_addr)FLASH_START) &&
@@ -541,24 +543,24 @@ struct registers_s {
  * The same for PCROP and SECR.
  */
 static const struct registers_s options_def[NB_REG_OPT] = {
-	[OPTR_ENUM]      = {FLASH_OPTR,      0xFFFFFEAA},
-	[PCROP1ASR_ENUM] = {FLASH_PCROP1ASR, 0xFFFFFFFF},
-	[PCROP1AER_ENUM] = {FLASH_PCROP1AER, 0x00000000},
-	[WRP1AR_ENUM]    = {FLASH_WRP1AR,    0x000000FF},
-	[WRP1BR_ENUM]    = {FLASH_WRP1BR,    0x000000FF},
-	[PCROP1BSR_ENUM] = {FLASH_PCROP1BSR, 0xFFFFFFFF},
-	[PCROP1BER_ENUM] = {FLASH_PCROP1BER, 0x00000000},
-	[PCROP2ASR_ENUM] = {FLASH_PCROP2ASR, 0xFFFFFFFF},
-	[PCROP2AER_ENUM] = {FLASH_PCROP2AER, 0x00000000},
-	[WRP2AR_ENUM]    = {FLASH_WRP2AR,    0x000000FF},
-	[WRP2BR_ENUM]    = {FLASH_WRP2BR,    0x000000FF},
-	[PCROP2BSR_ENUM] = {FLASH_PCROP2BSR, 0xFFFFFFFF},
-	[PCROP2BER_ENUM] = {FLASH_PCROP2BER, 0x00000000},
-	[SECR_ENUM]      = {FLASH_SECR,      0x00000000}
+	[OPTR_ENUM] = { FLASH_OPTR, 0xFFFFFEAA },
+	[PCROP1ASR_ENUM] = { FLASH_PCROP1ASR, 0xFFFFFFFF },
+	[PCROP1AER_ENUM] = { FLASH_PCROP1AER, 0x00000000 },
+	[WRP1AR_ENUM] = { FLASH_WRP1AR, 0x000000FF },
+	[WRP1BR_ENUM] = { FLASH_WRP1BR, 0x000000FF },
+	[PCROP1BSR_ENUM] = { FLASH_PCROP1BSR, 0xFFFFFFFF },
+	[PCROP1BER_ENUM] = { FLASH_PCROP1BER, 0x00000000 },
+	[PCROP2ASR_ENUM] = { FLASH_PCROP2ASR, 0xFFFFFFFF },
+	[PCROP2AER_ENUM] = { FLASH_PCROP2AER, 0x00000000 },
+	[WRP2AR_ENUM] = { FLASH_WRP2AR, 0x000000FF },
+	[WRP2BR_ENUM] = { FLASH_WRP2BR, 0x000000FF },
+	[PCROP2BSR_ENUM] = { FLASH_PCROP2BSR, 0xFFFFFFFF },
+	[PCROP2BER_ENUM] = { FLASH_PCROP2BER, 0x00000000 },
+	[SECR_ENUM] = { FLASH_SECR, 0x00000000 }
 };
 
 static void write_registers(target *t, const struct registers_s *regs,
-                                    uint8_t nb_regs)
+			    uint8_t nb_regs)
 {
 	for (uint8_t i = 0U; i < nb_regs; i++) {
 		if (regs[i].addr > 0U)
@@ -570,7 +572,7 @@ static void write_registers(target *t, const struct registers_s *regs,
  * Option bytes programming.
  */
 static bool stm32g0_option_write(target *t,
-                                 const struct registers_s *options_req)
+				 const struct registers_s *options_req)
 {
 	stm32g0_flash_unlock(t);
 	stm32g0_flash_option_unlock(t);
@@ -605,10 +607,8 @@ exit_error:
  * The register is added only if its address is valid.
  */
 static bool add_reg_value(struct registers_s *reg_req,
-                          const struct registers_s *reg_def,
-                          uint8_t reg_def_len,
-                          uint32_t addr,
-                          uint32_t val)
+			  const struct registers_s *reg_def,
+			  uint8_t reg_def_len, uint32_t addr, uint32_t val)
 {
 	for (uint8_t j = 0U; j < reg_def_len; j++) {
 		if (addr == reg_def[j].addr) {
@@ -624,9 +624,9 @@ static bool add_reg_value(struct registers_s *reg_req,
  * Parse (address, value) register pairs given on the command line.
  */
 static bool parse_cmdline_registers(int args_nb, const char **reg_str,
-                                    struct registers_s *reg_req,
-                                    const struct registers_s *reg_def,
-                                    uint8_t reg_def_len)
+				    struct registers_s *reg_req,
+				    const struct registers_s *reg_def,
+				    uint8_t reg_def_len)
 {
 	uint32_t addr = 0U;
 	uint32_t val = 0U;
@@ -634,7 +634,7 @@ static bool parse_cmdline_registers(int args_nb, const char **reg_str,
 
 	for (uint8_t i = 0U; i < args_nb; i += 2U) {
 		addr = strtoul(reg_str[i], NULL, 0);
-		val = strtoul(reg_str[i+1], NULL, 0);
+		val = strtoul(reg_str[i + 1], NULL, 0);
 		if (add_reg_value(reg_req, reg_def, reg_def_len, addr, val))
 			valid_regs_nb++;
 	}
@@ -652,7 +652,8 @@ static bool parse_cmdline_registers(int args_nb, const char **reg_str,
 static bool validate_options(target *t, const struct registers_s *options_req)
 {
 	if (((options_req[OPTR_ENUM].val & FLASH_OPTR_RDP_MASK) ==
-	    (uint32_t)0xCC) && !irreversible_enabled) {
+	     (uint32_t)0xCC) &&
+	    !irreversible_enabled) {
 		tc_printf(t, irreversible_message);
 		return false;
 	}
@@ -660,7 +661,7 @@ static bool validate_options(target *t, const struct registers_s *options_req)
 }
 
 static void display_registers(target *t, const struct registers_s *reg_def,
-                              uint8_t len)
+			      uint8_t len)
 {
 	uint32_t val = 0U;
 
@@ -704,8 +705,8 @@ static bool stm32g0_option_erase(target *t, struct registers_s *reg_req)
 		reg_req[OPTR_ENUM].addr = options_def[OPTR_ENUM].addr;
 		reg_req[OPTR_ENUM].val = optr;
 		reg_req[PCROP1AER_ENUM].addr = options_def[PCROP1AER_ENUM].addr;
-		reg_req[PCROP1AER_ENUM].val = pcrop1aer |
-				         (uint32_t)FLASH_PCROP1AER_PCROP_RDP;
+		reg_req[PCROP1AER_ENUM].val =
+			pcrop1aer | (uint32_t)FLASH_PCROP1AER_PCROP_RDP;
 		tc_printf(t, "Process again to complete erasure\n");
 		return stm32g0_option_write(t, reg_req);
 	} else {
@@ -719,16 +720,15 @@ static bool stm32g0_option_erase(target *t, struct registers_s *reg_req)
  */
 static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 {
-	struct registers_s options_req[NB_REG_OPT] = {{0U, 0U}};
+	struct registers_s options_req[NB_REG_OPT] = { { 0U, 0U } };
 
 	if ((argc == 2) && !strcmp(argv[1], "erase")) {
 		if (!stm32g0_option_erase(t, options_req))
 			goto exit_error;
 	} else if ((argc > 2) && (argc % 2U == 0U) &&
-	           !strcmp(argv[1], "write")) {
+		   !strcmp(argv[1], "write")) {
 		if (!parse_cmdline_registers(argc - 2, argv + 2, options_req,
-		                                                 options_def,
-		                                                 NB_REG_OPT))
+					     options_def, NB_REG_OPT))
 			goto exit_error;
 		if (!validate_options(t, options_req))
 			goto exit_error;
@@ -763,6 +763,6 @@ static bool stm32g0_cmd_irreversible(target *t, int argc, const char **argv)
 			ret = false;
 	}
 	tc_printf(t, "Irreversible operations: %s\n",
-		 irreversible_enabled ? "enabled" : "disabled");
+		  irreversible_enabled ? "enabled" : "disabled");
 	return ret;
 }
