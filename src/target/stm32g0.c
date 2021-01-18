@@ -215,7 +215,7 @@ bool stm32g0_probe(target *t)
 		break;
 	case STM32G0B_C:
 		/* SRAM 144 kB, Flash up to 512 kB */
-		strcat(driver_name, "B/C"); // TODO test these devices
+		strcat(driver_name, "B/C");
 		break;
 	default:
 		return false;
@@ -319,7 +319,6 @@ static void stm32g0_flash_lock(target *t)
 
 /*
  * Flash erasure function.
- * TODO perform a MER if len covers all pages (check start and end).
  */
 static int stm32g0_flash_erase(struct target_flash *f, target_addr addr,
 			       size_t len)
@@ -450,8 +449,6 @@ exit_cleanup:
  *********************************/
 /*
  * Custom commands.
- * TODO write OTP area. This can be done by standard programming in a usual
- * flash region without prior erasure.
  */
 
 static bool stm32g0_cmd_erase(target *t, uint32_t action_mer)
@@ -750,8 +747,7 @@ exit_error:
 
 /*
  * Enables irreversible operations:
- * RDP level 2 read protection;
- * OTP Flash area programming. TODO
+ * RDP level 2 read protection.
  */
 static bool stm32g0_cmd_irreversible(target *t, int argc, const char **argv)
 {
