@@ -334,6 +334,7 @@ static int stm32g0_flash_erase(struct target_flash *f, target_addr addr,
 
 	uint16_t page_nb = (uint16_t)((addr - f->start) / f->blocksize);
 
+	/* Determines the initial page if the buffer starts in bank 2 */
 	if (t->idcode == STM32G0B_C) { // Dual-bank devices
 		bank1_end_page_nb = ((f->length / 2U) - 1U) / f->blocksize;
 		bank2_start_addr = f->start + (f->length / 2U);
@@ -447,9 +448,6 @@ exit_cleanup:
 /**********************************
  * Custom commands
  *********************************/
-/*
- * Custom commands.
- */
 
 static bool stm32g0_cmd_erase(target *t, uint32_t action_mer)
 {
@@ -735,7 +733,7 @@ static bool stm32g0_cmd_option(target *t, int argc, const char **argv)
 		tc_printf(t, help_option_common);
 		tc_printf(t, "erase\n");
 		tc_printf(t, help_option_common);
-		tc_printf(t, "write <<addr val> ...>\n");
+		tc_printf(t, "write <addr> <val> [<addr> <val>]...\n");
 		display_registers(t, options_def, NB_REG_OPT);
 	}
 	return true;
