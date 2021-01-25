@@ -210,7 +210,7 @@ struct stm32l4_info const L4info[] = {
 		.sram3 = 384,
 		.flags = 3 | DUAL_BANK,
 	},
-	{
+/*	{
 		.idcode = ID_STM32G07,
 		.family = FAM_STM32G0x,
 		.designator = "STM32G07",
@@ -223,7 +223,7 @@ struct stm32l4_info const L4info[] = {
 		.designator = "STM32G03",
 		.sram1 = 8,
 		.flags = 1,
-	},
+	},*/
 	{
 		.idcode = ID_STM32G43,
 		.family = FAM_STM32G4xx,
