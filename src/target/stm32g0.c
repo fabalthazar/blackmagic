@@ -139,9 +139,13 @@ enum STM32G0_DEV_ID {
 	STM32G07_8 = 0x460,
 	STM32G0B_C = 0x467
 };
+struct saved_regs_s {
+	uint32_t rcc_apbenr1;
+	uint32_t dbg_cr;
+	uint32_t dbg_apb_fz1;
+};
 
-#define DRIVER_NAME_LENGTH 12
-static char driver_name[DRIVER_NAME_LENGTH];
+static struct saved_regs_s saved_regs = {0};
 static bool irreversible_enabled = false;
 static const char *help_option_common = "usage: monitor option ";
 static const char *irreversible_message = "Irreversible operations disabled\n";
@@ -198,43 +202,31 @@ static void stm32g0_add_flash(target *t, uint32_t addr, size_t length,
  */
 bool stm32g0_probe(target *t)
 {
-	driver_name[0] = '\0';
-	strcat(driver_name, "STM32G0");
 	switch (t->idcode) {
 	case STM32G03_4:
 		/* SRAM 8 kB, Flash up to 64 kB */
-		strcat(driver_name, "3/4");
+		t->driver = "STM32G03/4";
 		break;
 	case STM32G05_6:
 		/* SRAM 18 kB, Flash up to 64 kB */
-		strcat(driver_name, "5/6");
+		t->driver = "STM32G05/6";
 		break;
 	case STM32G07_8:
 		/* SRAM 36 kB, Flash up to 128 kB */
-		strcat(driver_name, "7/8");
+		t->driver = "STM32G07/8";
 		break;
 	case STM32G0B_C:
 		/* SRAM 144 kB, Flash up to 512 kB */
-		strcat(driver_name, "B/C");
+		t->driver = "STM32G0B/C";
 		break;
 	default:
 		return false;
 	}
 
-	t->driver = driver_name;
 	t->attach = stm32g0_attach;
 	t->detach = stm32g0_detach;
-	target_add_commands(t, stm32g0_cmd_list, driver_name);
+	target_add_commands(t, stm32g0_cmd_list, t->driver);
 	return true;
-}
-
-static void stm32g0_dbg_clock_enable(target *t)
-{
-	uint32_t rcc_apbenr1 = target_mem_read32(t, RCC_APBENR1);
-	if ((rcc_apbenr1 & RCC_APBENR1_DBGEN) == 0U) {
-		rcc_apbenr1 |= RCC_APBENR1_DBGEN;
-		target_mem_write32(t, RCC_APBENR1, rcc_apbenr1);
-	}
 }
 
 /*
@@ -255,13 +247,15 @@ static bool stm32g0_attach(target *t)
 	if (!cortexm_attach(t))
 		return false;
 
-	stm32g0_dbg_clock_enable(t);
-	target_mem_write32(t, DBG_CR,
-			   (uint32_t)(DBG_CR_DBG_STANDBY | DBG_CR_DBG_STOP));
-	uint32_t dbg_apb_fz1 = target_mem_read32(t, DBG_APB_FZ1);
-	dbg_apb_fz1 |= (uint32_t)(DBG_APB_FZ1_DBG_IWDG_STOP |
-				  DBG_APB_FZ1_DBG_WWDG_STOP);
-	target_mem_write32(t, DBG_APB_FZ1, dbg_apb_fz1);
+	saved_regs.rcc_apbenr1 = target_mem_read32(t, RCC_APBENR1);
+	target_mem_write32(t, RCC_APBENR1, saved_regs.rcc_apbenr1 |
+	                   RCC_APBENR1_DBGEN);
+	saved_regs.dbg_cr = target_mem_read32(t, DBG_CR);
+	target_mem_write32(t, DBG_CR, saved_regs.dbg_cr |
+			   (DBG_CR_DBG_STANDBY | DBG_CR_DBG_STOP));
+	saved_regs.dbg_apb_fz1 = target_mem_read32(t, DBG_APB_FZ1);
+	target_mem_write32(t, DBG_APB_FZ1, saved_regs.dbg_apb_fz1 |
+	                   (DBG_APB_FZ1_DBG_IWDG_STOP | DBG_APB_FZ1_DBG_WWDG_STOP));
 
 	target_mem_map_free(t);
 
@@ -293,13 +287,15 @@ static bool stm32g0_attach(target *t)
 }
 
 /*
- * Reset the target-specific debug registers and detach the debug core.
+ * Restore the modified registers and detach the debug core.
+ * The registers are restored as is to leave the target in the same state as
+ * before attachment.
  */
 static void stm32g0_detach(target *t)
 {
-	uint32_t dbg_cr = target_mem_read32(t, DBG_CR);
-	dbg_cr &= ~(uint32_t)(DBG_CR_DBG_STANDBY | DBG_CR_DBG_STOP);
-	target_mem_write32(t, DBG_CR, dbg_cr);
+	target_mem_write32(t, DBG_APB_FZ1, saved_regs.dbg_apb_fz1);
+	target_mem_write32(t, DBG_CR, saved_regs.dbg_cr);
+	target_mem_write32(t, RCC_APBENR1, saved_regs.rcc_apbenr1);
 
 	cortexm_detach(t);
 }
